@@ -6,12 +6,12 @@ The SWAN-ML project focuses on analyzing and predicting water quality using mach
 ## Project Structure
 
 ### Notebooks
-- **cal_swat_dataset_creation.ipynb**: Dataset creation for SWAT calibration.
-- **cal_swat_eda_comb.ipynb**: Combined exploratory data analysis for SWAT calibration.
+- **cal_swat_dataset_creation.ipynb**: Dataset creation for Calibrated SWAT + ML Usage.
+- **cal_swat_eda_comb.ipynb**: Combined exploratory data analysis and ML + SWAT Experiments.
 - **eda.ipynb**: General exploratory data analysis.
-- **henrique_code.ipynb**: Custom analysis scripts.
+- **henrique_code.ipynb**: Henrique's experiment code.
 - **other_site.ipynb**: Analysis for other sites.
-- **simulation_extractions.ipynb**: Extracting simulation results.
+- **simulation_extractions.ipynb**: Extracting SWAT simulation results.
 
 ### Data
 Located in the `data/` folder, this includes:
@@ -26,10 +26,12 @@ Located in the `figs/` folder, this includes visualizations such as:
 - Target vs. climate comparisons
 
 ### Scripts
+-`utils.py`: Utility functions for data processing and analysis.
+
 #### Future Climate Inference
 - `climate_change_data_inference_ffnn.py`: Inference using feedforward neural networks.
 - `climate_change_data_inference_residuals.py`: Residual-based inference.
-- `climate_change_data_inference.py`: General inference script.
+- `climate_change_data_inference.py`: Inference using Tabnet (can be switched out for any ML model).
 
 #### Model Tuning
 - `NN_hp_tuning.py`: Hyperparameter tuning for neural networks.
@@ -42,7 +44,7 @@ Located in the `models/` folder, this includes trained models such as:
 - `residual_Nitrate_DlyLd(kg).pt`
 
 ### Preprocessed Data
-Located in the `preprocessed_data/` folder, this includes preprocessed datasets for training and inference.
+Located in the `preprocessed_data/` folder, this includes preprocessed datasets for training.
 
 ## Requirements
 Install the required Python packages using:
