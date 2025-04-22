@@ -1,0 +1,13 @@
+# Ignore the data folder
+data/
+preprocessed_data/
+
+# Ignore mlflow related directories and objects
+mlruns/
+ml_prediction_outputs_ffnn/
+ml_prediction_outputs_residual/
+ml_prediction_outputs/
+mlflow_datasets/
+models/
+
+__pycache__/
