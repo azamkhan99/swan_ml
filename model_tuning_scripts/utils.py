@@ -78,6 +78,43 @@ def select_features(X, y, target_column, importance_threshold=0.01):
     return X[important_features]
 
 
+from pytorch_tabnet.tab_model import TabNetRegressor
+import pandas as pd
+import numpy as np
+
+
+def select_top_features_tabnet(X, y, target_column, top_n=25):
+    # Convert to numpy arrays
+    X_np = X.values
+    y_np = y.values.reshape(-1, 1)
+
+    # Train TabNet for feature importance extraction
+    model = TabNetRegressor(seed=42)
+    model.fit(
+        X_np,
+        y_np,
+        max_epochs=100,
+        patience=10,
+        batch_size=1024,
+        virtual_batch_size=128,
+        num_workers=0,
+        drop_last=False,
+    )
+
+    # Get and rank feature importances
+    feature_importances = pd.Series(model.feature_importances_, index=X.columns)
+    top_features = feature_importances.sort_values(ascending=False).head(top_n).index
+
+    if "Calibrated_SWAT_Streamflow" not in top_features:
+        top_features = top_features.insert(0, "Calibrated_SWAT_Streamflow")
+        # delete the last element to maintain the top_n count
+        top_features = top_features[:-1]
+
+    print(f"Top {top_n} features for {target_column}:\n", top_features.tolist())
+
+    return X[top_features]
+
+
 def create_lagged_and_cumulative_features(dataset, lag_days, cumulation_days):
     """
     Creates lagged and cumulative features for specified columns in a Pandas DataFrame.

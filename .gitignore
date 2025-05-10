@@ -7,6 +7,7 @@ mlruns/
 ml_prediction_outputs_ffnn/
 ml_prediction_outputs_residual/
 ml_prediction_outputs/
+ml_prediction_outputs_no_doy/
 mlflow_datasets/
 models/
 

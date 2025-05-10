@@ -17,6 +17,7 @@ import torch
 import json
 from mlflow.pyfunc import PythonModel
 from mlflow.data.pandas_dataset import PandasDataset
+from mlflow.tracking import MlflowClient
 
 from utils import (
     create_lagged_and_cumulative_features,
@@ -186,7 +187,7 @@ def run():
             dataset_path = f"mlflow_datasets/{target}_X_train_scaled.csv"
             X_train_scaled_df = pd.DataFrame(X_train_scaled, columns=feature_names)
             X_train_scaled_df.to_csv(dataset_path, index=False)
-            # mlflow.log_artifact(dataset_path, artifact_path="datasets")
+            mlflow.log_artifact(dataset_path, artifact_path="datasets")
             dataset = mlflow.data.from_pandas(
                 X_train_scaled_df,
                 source=dataset_path,
@@ -217,8 +218,42 @@ def run():
             #     patience=15,
             # )
             model = TabNetRegressor()
-            model.load_model(
-                filepath=f"models/tabnet_{target.replace(' ', '_')}.zip.zip"
+
+            # load best parameters from mlflow
+            client = MlflowClient()
+            run = client.get_run(run_id_model_mapping[target])
+            best_params = run.data.params
+
+            model = TabNetRegressor(
+                n_d=int(best_params["n_d"]),
+                n_a=int(best_params["n_a"]),
+                n_steps=int(best_params["n_steps"]),
+                gamma=float(best_params["gamma"]),
+                lambda_sparse=float(best_params["lambda_sparse"]),
+                optimizer_fn=torch.optim.Adam,
+                optimizer_params={"lr": float(best_params["lr"])},
+                seed=42,
+            )
+            mlflow.log_params(best_params)
+            # model.load_model(
+            #     filepath=f"models/tabnet_{target.replace(' ', '_')}.zip.zip"
+            # )
+
+            # train model on all train+val data
+            X_train_val = np.concatenate((X_train_scaled, X_val_scaled), axis=0)
+            y_train_val = np.concatenate(
+                (
+                    y_train[target].values.reshape(-1, 1),
+                    y_val[target].values.reshape(-1, 1),
+                ),
+                axis=0,
+            )
+
+            model.fit(
+                X_train_val,
+                y_train_val,
+                max_epochs=200,
+                patience=15,
             )
 
             preds_test = model.predict(X_test_scaled).flatten()
@@ -278,12 +313,41 @@ def run():
                     "Monthly MAPE": monthly_mape,
                 }
             )
-
-            # model.save_model(f"models/tabnet_{target.replace(' ', '_')}.zip")
-            mlflow.pyfunc.log_model(
-                artifact_path=f"models/tabnet_{target.replace(' ', '_')}",
-                python_model=TabNetPythonModel(model),
+            # train model on all train+val+test data
+            X_train_val_test = np.concatenate(
+                (X_train_scaled, X_val_scaled, X_test_scaled), axis=0
             )
+            y_train_val_test = np.concatenate(
+                (
+                    y_train[target].values.reshape(-1, 1),
+                    y_val[target].values.reshape(-1, 1),
+                    y_test[target].values.reshape(-1, 1),
+                ),
+                axis=0,
+            )
+            full_model = TabNetRegressor(
+                n_d=int(best_params["n_d"]),
+                n_a=int(best_params["n_a"]),
+                n_steps=int(best_params["n_steps"]),
+                gamma=float(best_params["gamma"]),
+                lambda_sparse=float(best_params["lambda_sparse"]),
+                optimizer_fn=torch.optim.Adam,
+                optimizer_params={"lr": float(best_params["lr"])},
+                seed=42,
+            )
+            full_model.fit(
+                X_train_val_test,
+                y_train_val_test,
+                max_epochs=200,
+                patience=15,
+            )
+            # Save the model
+
+            full_model.save_model(f"models/tabnet_{target.replace(' ', '_')}.zip")
+            # mlflow.pyfunc.log_model(
+            #     artifact_path=f"models/tabnet_{target.replace(' ', '_')}",
+            #     python_model=TabNetPythonModel(full_model),
+            # )
             print(
                 f"Model for {target} saved as models/tabnet_{target.replace(' ', '_')}.zip"
             )

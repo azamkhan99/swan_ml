@@ -14,7 +14,9 @@ import hyperopt
 import json
 import shap
 
-from xgboost import XGBRegressor
+from pytorch_tabnet.tab_model import TabNetRegressor
+from captum.attr import IntegratedGradients
+import torch
 import logging
 import os
 
@@ -32,14 +34,45 @@ from utils import (
 )
 
 
+def attribute_with_tqdm(ig_explainer, X_tensor, target=0, batch_size=32):
+    from tqdm import tqdm
+
+    all_attributions = []
+    all_deltas = []
+    n = X_tensor.shape[0]
+
+    for i in tqdm(range(0, n, batch_size), desc="Attributing with IG"):
+        batch = X_tensor[i : i + batch_size]
+        attr, delta = ig_explainer.attribute(
+            batch, target=target, return_convergence_delta=True
+        )
+        all_attributions.append(attr)
+        all_deltas.append(delta)
+
+    all_attributions = torch.cat(all_attributions, dim=0)
+    all_deltas = torch.cat(all_deltas, dim=0)
+    return all_attributions, all_deltas
+
+
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+
 def date_feature_transformations(dataset):
     dataset["Date"] = pd.to_datetime(dataset["Date"])
     dataset["month"] = dataset["Date"].dt.month
     dataset["DOY"] = dataset["Date"].dt.dayofyear
-    dataset["DOY_cos"] = np.cos(2 * np.pi * dataset["DOY"] / 365)
-    dataset["DOY_sin"] = np.sin(2 * np.pi * dataset["DOY"] / 365)
+    # dataset["DOY_cos"] = np.cos(2 * np.pi * dataset["DOY"] / 365)
+    # dataset["DOY_sin"] = np.sin(2 * np.pi * dataset["DOY"] / 365)
     dataset["month_cos"] = np.cos(2 * np.pi * dataset["month"] / 12)
     dataset["month_sin"] = np.sin(2 * np.pi * dataset["month"] / 12)
+    dataset["quarter_cos"] = np.cos(2 * np.pi * dataset["Date"].dt.quarter / 4)
+    dataset["quarter_sin"] = np.sin(2 * np.pi * dataset["Date"].dt.quarter / 4)
     dataset["Temp_range"] = dataset["MaxT"] - dataset["MinT"]
     dataset.drop(["DOY"], axis=1, inplace=True)
     dataset.drop(["month"], axis=1, inplace=True)
@@ -67,9 +100,9 @@ def main():
     # Define run ID mapping
     mlflow.set_tracking_uri("file:///Users/azamkhan/columbia/climate/swan_ml/mlruns")
     run_id_model_mapping = {
-        "Sediments DlyLd(kg*1000)": "c54a1179209f4d409fcddab75f0c4012",
-        "Nitrate DlyLd(kg)": "5fa63d4859b140ee855e64faa05d0b40",
-        "Phosphate DlyLd(kg)": "0a0e9e924ece4b4eadc0f43defec7652",
+        "Sediments DlyLd(kg*1000)": "daede30acf2a490da6b886f4cc69c0d2",
+        "Nitrate DlyLd(kg)": "513e9c3d05a54e719a377b1994cb7533",
+        "Phosphate DlyLd(kg)": "f75e30d123a3499faf9b53d1c0672808",
     }
 
     climate_models = [
@@ -80,9 +113,9 @@ def main():
         # "UKESM1-0-LL",
     ]
     targets = [
-        "Sediments DlyLd(kg*1000)",
+        # "Sediments DlyLd(kg*1000)",
         "Nitrate DlyLd(kg)",
-        "Phosphate DlyLd(kg)",
+        # "Phosphate DlyLd(kg)",
     ]
 
     swat_column_mapping = {
@@ -176,31 +209,56 @@ def main():
                 X = X[input_features]
 
                 scaler = load_scaler(target, run_id_model_mapping)
-                X = scaler.transform(X)
+                X_scaled = scaler.transform(X)
 
-                mlflow_model_uri = f"runs:/{run_id_model_mapping[target]}/models/tabnet_{target.replace(' ', '_')}"
-                loaded_model = mlflow.pyfunc.load_model(mlflow_model_uri)
-                # loaded_model = mlflow.sklearn.load_model(mlflow_model_uri)
+                # --- Load your TabNet model (PyTorch native model, not pyfunc wrapper) ---
+                # tabnet_model_uri = f"runs:/{run_id_model_mapping[target]}/models/tabnet_{target.replace(' ', '_')}"
+                tabnet_model_path = (
+                    f"../models/tabnet_no_doy_{target.replace(' ', '_')}.zip"
+                )
+                # tabnet_model = mlflow.pyfunc.load_model(tabnet_model_uri)
 
-                # X_train_path = f"mlruns/806858634930860684/{run_id_model_mapping[target]}/artifacts/dataset/{target}_X_train_scaled.csv"
-                # X_train = pd.read_csv(X_train_path)
-                # background_data = X_train.sample(100, random_state=42)
+                # # now load model as a pytorch tabnet model
+                device = get_device()
+                tabnet_model = TabNetRegressor(device_name="mps")
+                tabnet_model.load_model(tabnet_model_path)
 
-                # def predict_fn(x):
-                #     return loaded_model.predict(x)
+                # --- TabNet expects torch.FloatTensor ---
+                X_tensor = torch.tensor(X_scaled, dtype=torch.float32).to(device)
 
-                # explainer = shap.KernelExplainer(predict_fn, background_data)
+                network = tabnet_model.network
+                network.eval()
 
-                # def explain_prediction(new_data):
-                #     shap_values = explainer.shap_values(new_data)
-                #     return shap_values
+                # tabnet_model.network.eval()
 
-                # logging.info("Explaining predictions...")
-                # sv = explainer(X)
+                # --- Create Captum Integrated Gradients Explainer ---
 
-                y_pred = loaded_model.predict(X).flatten()
-                # y_pred = sv.data
+                logging.info(
+                    f"Explaining predictions for {target} using Integrated Gradients..."
+                )
 
+                def clean_forward(x):
+                    outputs, _ = network(x)
+                    return outputs
+
+                ig = IntegratedGradients(clean_forward)
+
+                # --- Compute attributions ---
+                # attributions, delta = ig.attribute(
+                #     X_tensor,
+                #     target=0,
+                #     return_convergence_delta=True,
+                # )
+                attributions, delta = attribute_with_tqdm(
+                    ig, X_tensor, target=0, batch_size=32
+                )
+
+                # --- Predictions ---
+                with torch.no_grad():
+                    outputs, M_loss = network(X_tensor)
+                    y_pred = outputs.cpu().numpy().flatten()
+
+                # --- Save predictions ---
                 inference_results_df = pd.DataFrame(
                     {
                         "Date": dataset["Date"],
@@ -208,14 +266,9 @@ def main():
                     }
                 )
 
-                logging.info("Writing results to CSV...")
-                # results_df.to_csv("results.csv", index=True)
                 output_dir = (
-                    f"ml_prediction_outputs/{climate_model}/{emission_scenario}"
+                    f"ml_prediction_outputs_no_doy/{climate_model}/{emission_scenario}"
                 )
-                # logging.info(
-                #     f"Writing results to {output_dir}/{target.split(' ')[0]}_raw_predictions.csv..."
-                # )
                 if not os.path.exists(output_dir):
                     os.makedirs(output_dir)
                 inference_results_df.to_csv(
@@ -223,26 +276,28 @@ def main():
                     index=False,
                 )
 
-                # shap_output_dir = f"ml_prediction_outputs/{climate_model}/{emission_scenario}/shap_values"
-                # if not os.path.exists(shap_output_dir):
-                #     os.makedirs(shap_output_dir)
-                # logging.info(
-                #     f"Writing SHAP values to {shap_output_dir}/{target.split(' ')[0]}_shap_values.csv..."
-                # )
-                # shap_values_df = pd.DataFrame(
-                #     np.c_[sv.base_values, sv.values], columns=["bv"] + input_features
-                # )
-                # shap_values_df["Date"] = dataset["Date"]
-                # shap_values_df.to_csv(
-                #     f"{shap_output_dir}/{target.split(' ')[0]}_shap_values.csv",
-                #     index=False,
-                # )
+                # --- Save attributions ---
+                shap_output_dir = f"ml_prediction_outputs_no_doy/{climate_model}/{emission_scenario}/shap_values"
+                if not os.path.exists(shap_output_dir):
+                    os.makedirs(shap_output_dir)
+
+                attributions_np = attributions.detach().cpu().numpy()
+                attributions_df = pd.DataFrame(attributions_np, columns=input_features)
+                attributions_df["Date"] = dataset["Date"]
+
+                logging.info(
+                    f"Saving feature attributions to {shap_output_dir}/{target.split(' ')[0]}_attributions.csv"
+                )
+                attributions_df.to_csv(
+                    f"{shap_output_dir}/{target.split(' ')[0]}_attributions.csv",
+                    index=False,
+                )
 
                 logging.info(f"{target}: {inference_results_df.head(1)}")
 
-            logging.info(
-                f"Inference results written to CSV for {climate_model} {emission_scenario}."
-            )
+                logging.info(
+                    f"Inference results and attributions written to CSV for {climate_model} {emission_scenario}."
+                )
 
 
 if __name__ == "__main__":
