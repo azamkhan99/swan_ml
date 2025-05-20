@@ -100,9 +100,9 @@ def main():
     # Define run ID mapping
     mlflow.set_tracking_uri("file:///Users/azamkhan/columbia/climate/swan_ml/mlruns")
     run_id_model_mapping = {
-        "Sediments DlyLd(kg*1000)": "daede30acf2a490da6b886f4cc69c0d2",
-        "Nitrate DlyLd(kg)": "513e9c3d05a54e719a377b1994cb7533",
-        "Phosphate DlyLd(kg)": "f75e30d123a3499faf9b53d1c0672808",
+        "Sediments DlyLd(kg*1000)": "7dbc2f38bdda4a7b865971cfbc3b0b9e",
+        "Nitrate DlyLd(kg)": "f7a1076fd4214612822c27002eaaf017",
+        "Phosphate DlyLd(kg)": "ee57487119f54539967d5002b8ac6268",
     }
 
     climate_models = [
@@ -113,9 +113,9 @@ def main():
         # "UKESM1-0-LL",
     ]
     targets = [
-        # "Sediments DlyLd(kg*1000)",
+        "Sediments DlyLd(kg*1000)",
         "Nitrate DlyLd(kg)",
-        # "Phosphate DlyLd(kg)",
+        "Phosphate DlyLd(kg)",
     ]
 
     swat_column_mapping = {

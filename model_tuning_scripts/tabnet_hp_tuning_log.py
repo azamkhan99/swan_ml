@@ -29,12 +29,6 @@ from utils import (
 import torch.nn.functional as F
 
 
-def non_negative_mse_loss(y_pred, y_true):
-    mse = F.mse_loss(y_pred, y_true)
-    penalty = torch.sum(torch.relu(-y_pred))  # Penalize negative predictions
-    return mse + 10.0 * penalty  # adjust 10.0 as a hyperparameter
-
-
 # Set paths
 data_path = "preprocessed_data/"
 os.makedirs("models", exist_ok=True)
@@ -113,8 +107,8 @@ features = {
 #         "lr": best["lr"],
 #     }
 def hyperopt_tabnet(X_train, y_train, X_val, y_val):
-    y_train = y_train.values.reshape(-1, 1)
-    y_val = y_val.values.reshape(-1, 1)
+    y_train = np.log1p(y_train.values.reshape(-1, 1))
+    y_val = np.log1p(y_val.values.reshape(-1, 1))
 
     def objective(params):
         model = TabNetRegressor(
@@ -145,7 +139,6 @@ def hyperopt_tabnet(X_train, y_train, X_val, y_val):
             patience=10,
             batch_size=32,
             drop_last=False,
-            loss_fn=non_negative_mse_loss,  # Use custom loss function
         )
 
         preds = model.predict(X_val)
@@ -182,22 +175,19 @@ def hyperopt_tabnet(X_train, y_train, X_val, y_val):
 
 
 def run():
-    # mlflow.set_tracking_uri("http://localhost:5000")
     mlflow.set_experiment("Daily Timestep")
 
     y_vals = {}
     tabnet_y_tests = {}
 
     for target in targets:
-        with mlflow.start_run(run_name=f"{target.split()[0]}_tabnet_no_doy"):
+        with mlflow.start_run(run_name=f"{target.split()[0]}_tabnet_log_transform"):
             df = pd.read_csv(
-                os.path.join(data_path, f"{target}.csv"),
-                parse_dates=["Date"],
+                os.path.join(data_path, f"{target}.csv"), parse_dates=["Date"]
             )
             df["quarter_cos"] = np.cos(2 * np.pi * (df["Date"].dt.quarter - 1) / 4)
             df["quarter_sin"] = np.sin(2 * np.pi * (df["Date"].dt.quarter - 1) / 4)
-            X = df.drop(columns=["Date"] + [target], axis=1)
-            X.drop(columns=["DOY_cos", "DOY_sin"], inplace=True)
+            X = df.drop(columns=["Date", target, "DOY_cos", "DOY_sin"], errors="ignore")
             y = df[["Date", target]]
 
             X = X.drop(
@@ -208,7 +198,6 @@ def run():
                 ]
             )
 
-            # Split the data
             X_train, X_temp, y_train, y_temp = train_test_split(
                 X, y, test_size=0.3, random_state=42, shuffle=False
             )
@@ -218,9 +207,7 @@ def run():
             y_vals[target] = y_val
             tabnet_y_tests[target] = y_test
 
-            # if target != "Phosphate DlyLd(kg)":
             X = select_top_features_tabnet(X_train, y_train[target], target)
-
             X_train = X_train[X.columns]
             X_val = X_val[X.columns]
             X_test = X_test[X.columns]
@@ -237,16 +224,11 @@ def run():
             X_test_scaled = scaler.transform(X_test)
 
             mlflow.sklearn.log_model(scaler, f"{target}_scaler")
+
             dataset_path = f"mlflow_datasets/{target}_X_train_scaled.csv"
             X_train_scaled_df = pd.DataFrame(X_train_scaled, columns=feature_names)
             X_train_scaled_df.to_csv(dataset_path, index=False)
             mlflow.log_artifact(dataset_path, artifact_path="datasets")
-            dataset = mlflow.data.from_pandas(
-                X_train_scaled_df,
-                source=dataset_path,
-                name=f"{target} Scaled Training Data",
-                # targets=f"{target}",
-            )
 
             mlflow.log_param("target", target)
             best_params = hyperopt_tabnet(
@@ -272,28 +254,27 @@ def run():
                 # },
             )
 
-            X_train_val = np.concatenate((X_train_scaled, X_val_scaled), axis=0)
-            y_train_val = np.concatenate(
-                (
-                    y_train[target].values.reshape(-1, 1),
-                    y_val[target].values.reshape(-1, 1),
-                ),
-                axis=0,
-            )
+            y_train_log = np.log1p(y_train[target].values.reshape(-1, 1))
+            y_val_log = np.log1p(y_val[target].values.reshape(-1, 1))
+            y_test_log = np.log1p(y_test[target].values.reshape(-1, 1))
+
+            X_train_val_scaled = np.vstack((X_train_scaled, X_val_scaled))
+            y_train_val_log = np.vstack((y_train_log, y_val_log))
 
             model.fit(
-                X_train_val,
-                y_train_val,
+                X_train_val_scaled,
+                y_train_val_log,
                 max_epochs=200,
                 patience=15,
-                loss_fn=non_negative_mse_loss,  # Use custom loss function
             )
 
-            preds_test = model.predict(X_test_scaled).flatten()
-            # print number of negative predictions
+            preds_test_log = model.predict(X_test_scaled).flatten()
+            preds_test = np.expm1(preds_test_log)
             num_neg_preds = np.sum(preds_test < 0)
 
-            print(f"Number of negative predictions: {num_neg_preds}")
+            print(f"Number of negative predictions for {target}: {num_neg_preds}")
+            # log number of negative predictions to mlflow
+            mlflow.log_metric("num_neg_preds", num_neg_preds)
             r2 = r_squared(y_test[target], preds_test)
             nse = nse_score(y_test[target], preds_test)
             pbias = pbias_score(y_test[target], preds_test)
@@ -312,11 +293,7 @@ def run():
                 }
             )
             df_month["Date"] = pd.to_datetime(df_month["Date"])
-
-            # Extract year-month for grouping
             df_month["month"] = df_month["Date"].dt.to_period("M")
-
-            # Aggregate daily loads into monthly totals
             monthly_df = (
                 df_month.groupby("month")
                 .agg({"Observed": "sum", "Predicted": "sum"})
@@ -332,36 +309,19 @@ def run():
             )
             monthly_nse = nse_score(monthly_df["Observed"], monthly_df["Predicted"])
             monthly_pbias = pbias_score(monthly_df["Observed"], monthly_df["Predicted"])
-            monthly_metrics = {}
-            monthly_metrics[target] = {
-                "R2": monthly_r2,
-                "NSE": monthly_nse,
-                "PBIAS": monthly_pbias,
-                "MAE": monthly_mae,
-                "MAPE": monthly_mape,
+            monthly_metrics = {
+                "Monthly R2": monthly_r2,
+                "Monthly NSE": monthly_nse,
+                "Monthly PBIAS": monthly_pbias,
+                "Monthly MAE": monthly_mae,
+                "Monthly MAPE": monthly_mape,
             }
+            mlflow.log_metrics(monthly_metrics)
 
-            mlflow.log_metrics(
-                {
-                    "Monthly R2": monthly_r2,
-                    "Monthly NSE": monthly_nse,
-                    "Monthly PBIAS": monthly_pbias,
-                    "Monthly MAE": monthly_mae,
-                    "Monthly MAPE": monthly_mape,
-                }
+            X_train_val_test_scaled = np.vstack(
+                (X_train_scaled, X_val_scaled, X_test_scaled)
             )
-
-            X_train_val_test = np.concatenate(
-                (X_train_scaled, X_val_scaled, X_test_scaled), axis=0
-            )
-            y_train_val_test = np.concatenate(
-                (
-                    y_train[target].values.reshape(-1, 1),
-                    y_val[target].values.reshape(-1, 1),
-                    y_test[target].values.reshape(-1, 1),
-                ),
-                axis=0,
-            )
+            y_train_val_test_log = np.vstack((y_train_log, y_val_log, y_test_log))
             full_model = TabNetRegressor(
                 n_d=best_params["n_d"],
                 n_a=best_params["n_a"],
@@ -380,18 +340,18 @@ def run():
                 # },
             )
             full_model.fit(
-                X_train_val_test,
-                y_train_val_test,
+                X_train_val_test_scaled,
+                y_train_val_test_log,
                 max_epochs=200,
                 patience=15,
-                loss_fn=non_negative_mse_loss,  # Use custom loss function
             )
 
-            full_model.save_model(f"models/tabnet_no_doy_{target.replace(' ', '_')}")
+            # Save final model
+            full_model.save_model(f"models/tabnet_log_{target.replace(' ', '_')}")
             print(
-                f"Model for {target} saved as models/tabnet_{target.replace(' ', '_')}.zip"
+                f"Model for {target} saved as models/tabnet_log_{target.replace(' ', '_')}.zip"
             )
-            print(f"Monthly metrics for {target}: {monthly_metrics[target]}")
+            print(f"Monthly metrics for {target}: {monthly_metrics}")
 
 
 if __name__ == "__main__":

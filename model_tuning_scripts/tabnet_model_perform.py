@@ -5,6 +5,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
+    mean_squared_error,
     r2_score,
     median_absolute_error,
     mean_absolute_error,
@@ -76,9 +77,9 @@ features = {
 }
 
 run_id_model_mapping = {
-    "Sediments DlyLd(kg*1000)": "8700ff2da269422b9f35f7868ac92dc1",
-    "Nitrate DlyLd(kg)": "ac1dd6790db74be29db5244af30263fc",
-    "Phosphate DlyLd(kg)": "e59dafd7b9d742a9adbde6356069873b",
+    "Sediments DlyLd(kg*1000)": "daede30acf2a490da6b886f4cc69c0d2",
+    "Nitrate DlyLd(kg)": "513e9c3d05a54e719a377b1994cb7533",
+    "Phosphate DlyLd(kg)": "f75e30d123a3499faf9b53d1c0672808",
 }
 
 
@@ -95,8 +96,17 @@ def hyperopt_tabnet(X_train, y_train, X_val, y_val):
             lambda_sparse=params["lambda_sparse"],
             optimizer_fn=torch.optim.Adam,
             optimizer_params={"lr": params["lr"]},
+            scheduler_fn=torch.optim.lr_scheduler.ReduceLROnPlateau,
+            scheduler_params={
+                "mode": "min",
+                "patience": 5,
+                "factor": 0.5,
+                "min_lr": 1e-5,
+            },
             seed=42,
+            verbose=0,
         )
+
         model.fit(
             X_train=X_train,
             y_train=y_train,
@@ -105,9 +115,12 @@ def hyperopt_tabnet(X_train, y_train, X_val, y_val):
             max_epochs=100,
             patience=10,
             batch_size=32,
+            drop_last=False,
         )
+
         preds = model.predict(X_val)
-        return {"loss": np.mean((y_val - preds) ** 2), "status": STATUS_OK}
+        loss = mean_squared_error(y_val, preds)
+        return {"loss": loss, "status": STATUS_OK}
 
     space = {
         "n_d": hp.quniform("n_d", 8, 64, 8),
@@ -138,12 +151,15 @@ def run():
     tabnet_y_tests = {}
 
     for target in targets:
-        with mlflow.start_run(run_name=f"{target.split()[0]}_tabnet_infer"):
+        with mlflow.start_run(run_name=f"{target.split()[0]}_tabnet_no_doy_infer"):
             df = pd.read_csv(
                 os.path.join(data_path, f"{target}.csv"),
                 parse_dates=["Date"],
             )
+            df["quarter_cos"] = np.cos(2 * np.pi * (df["Date"].dt.quarter - 1) / 4)
+            df["quarter_sin"] = np.sin(2 * np.pi * (df["Date"].dt.quarter - 1) / 4)
             X = df.drop(columns=["Date"] + [target], axis=1)
+            X.drop(columns=["DOY_cos", "DOY_sin"], inplace=True)
             y = df[["Date", target]]
 
             X = X.drop(
@@ -164,13 +180,13 @@ def run():
             y_vals[target] = y_val
             tabnet_y_tests[target] = y_test
 
-            if target != "Phosphate DlyLd(kg)":
-                # X = select_features(X_train, y_train[target], target)
-                input_features = select_features(target, run_id_model_mapping)
-                # X = X[input_features]
-                X_train = X_train[input_features]
-                X_val = X_val[input_features]
-                X_test = X_test[input_features]
+            # if target != "Phosphate DlyLd(kg)":
+            # X = select_features(X_train, y_train[target], target)
+            input_features = select_features(target, run_id_model_mapping)
+            # X = X[input_features]
+            X_train = X_train[input_features]
+            X_val = X_val[input_features]
+            X_test = X_test[input_features]
 
             feature_names = list(X_train.columns)
             mlflow.log_dict(
@@ -257,6 +273,9 @@ def run():
             )
 
             preds_test = model.predict(X_test_scaled).flatten()
+            # print number of negative predictions
+            num_neg_preds = np.sum(preds_test < 0)
+            print(f"Number of negative predictions: {num_neg_preds}")
             r2 = r_squared(y_test[target], preds_test)
             nse = nse_score(y_test[target], preds_test)
             pbias = pbias_score(y_test[target], preds_test)
